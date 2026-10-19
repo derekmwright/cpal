@@ -12,7 +12,6 @@ use windows::Win32::Media::Audio;
 
 mod com;
 mod device;
-#[cfg(any(feature = "audio_thread_priority", test))]
 mod priority;
 mod priority_observation;
 mod stream;

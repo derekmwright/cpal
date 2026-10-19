@@ -4,7 +4,9 @@ use std::sync::{
 };
 
 /// Observed MMCSS registration state for one WASAPI worker, not a latency guarantee.
+/// Fork extension for Transit DAW; this is not an upstream CPAL API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[repr(u8)]
 pub enum ThreadPriorityStatus {
     /// The optional real-time helper is disabled; native fallback priority is not observed.
@@ -22,6 +24,7 @@ pub enum ThreadPriorityStatus {
 }
 
 /// A read-only observation handle scoped to one stream worker lifetime.
+/// Fork extension for Transit DAW; this is not an upstream CPAL API.
 ///
 /// Clones remain usable after the stream closes. A new stream always owns a new observation;
 /// a previous stream's success is never inherited. No log parsing or OS query occurs on read.

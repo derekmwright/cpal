@@ -82,6 +82,7 @@ pub struct StreamInner {
 impl Stream {
     /// Observe the actual scheduling registration result for this worker generation.
     /// Available even after close if the returned handle is retained by the caller.
+    /// Fork extension for Transit DAW; this is not an upstream CPAL API.
     pub fn thread_priority_observation(&self) -> ThreadPriorityObservation {
         self.priority.clone()
     }
@@ -277,16 +278,24 @@ fn get_available_frames(stream: &StreamInner) -> Result<u32, StreamError> {
 }
 
 fn run_input(
+    run_ctxt: RunContext,
+    data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
+    error_callback: &mut dyn FnMut(StreamError),
+) {
+    let buffer_size = run_ctxt.stream.config.buffer_size;
+    let sample_rate = run_ctxt.stream.config.sample_rate;
+    let observation = run_ctxt.priority.clone();
+    super::priority::run(
+        || boost_current_thread_priority(buffer_size, sample_rate, &observation),
+        || run_input_body(run_ctxt, data_callback, error_callback),
+    );
+}
+
+fn run_input_body(
     mut run_ctxt: RunContext,
     data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
-    let _priority = boost_current_thread_priority(
-        run_ctxt.stream.config.buffer_size,
-        run_ctxt.stream.config.sample_rate,
-        &run_ctxt.priority,
-    );
-
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
             Some(ControlFlow::Break) => break,
@@ -310,16 +319,24 @@ fn run_input(
 }
 
 fn run_output(
+    run_ctxt: RunContext,
+    data_callback: &mut dyn FnMut(&mut Data, &OutputCallbackInfo),
+    error_callback: &mut dyn FnMut(StreamError),
+) {
+    let buffer_size = run_ctxt.stream.config.buffer_size;
+    let sample_rate = run_ctxt.stream.config.sample_rate;
+    let observation = run_ctxt.priority.clone();
+    super::priority::run(
+        || boost_current_thread_priority(buffer_size, sample_rate, &observation),
+        || run_output_body(run_ctxt, data_callback, error_callback),
+    );
+}
+
+fn run_output_body(
     mut run_ctxt: RunContext,
     data_callback: &mut dyn FnMut(&mut Data, &OutputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
-    let _priority = boost_current_thread_priority(
-        run_ctxt.stream.config.buffer_size,
-        run_ctxt.stream.config.sample_rate,
-        &run_ctxt.priority,
-    );
-
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
             Some(ControlFlow::Break) => break,
