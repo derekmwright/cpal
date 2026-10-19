@@ -11,6 +11,8 @@ use windows::Win32::Media::Audio;
 
 mod com;
 mod device;
+#[cfg(any(feature = "audio_thread_priority", test))]
+mod priority;
 mod stream;
 
 /// The WASAPI host, the default windows host type.

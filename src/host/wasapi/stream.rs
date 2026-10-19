@@ -268,7 +268,7 @@ fn run_input(
     data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
-    boost_current_thread_priority(
+    let _priority = boost_current_thread_priority(
         run_ctxt.stream.config.buffer_size,
         run_ctxt.stream.config.sample_rate,
     );
@@ -300,7 +300,7 @@ fn run_output(
     data_callback: &mut dyn FnMut(&mut Data, &OutputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
-    boost_current_thread_priority(
+    let _priority = boost_current_thread_priority(
         run_ctxt.stream.config.buffer_size,
         run_ctxt.stream.config.sample_rate,
     );
@@ -327,8 +327,26 @@ fn run_output(
     }
 }
 
+// Owned by the WASAPI worker, not the thread that owns Stream. Registration and
+// release must both run on the registered thread, outside data callbacks.
 #[cfg(feature = "audio_thread_priority")]
-fn boost_current_thread_priority(buffer_size: BufferSize, sample_rate: crate::SampleRate) {
+type ThreadPriorityGuard = super::priority::Guard<
+    audio_thread_priority::RtPriorityHandle,
+    fn(audio_thread_priority::RtPriorityHandle),
+>;
+
+#[cfg(feature = "audio_thread_priority")]
+fn release_thread_priority(handle: audio_thread_priority::RtPriorityHandle) {
+    if let Err(err) = audio_thread_priority::demote_current_thread_from_real_time(handle) {
+        eprintln!("Failed to restore audio thread priority: {err}");
+    }
+}
+
+#[cfg(feature = "audio_thread_priority")]
+fn boost_current_thread_priority(
+    buffer_size: BufferSize,
+    sample_rate: crate::SampleRate,
+) -> Option<ThreadPriorityGuard> {
     use audio_thread_priority::promote_current_thread_to_real_time;
 
     let buffer_size = if let BufferSize::Fixed(buffer_size) = buffer_size {
@@ -338,8 +356,15 @@ fn boost_current_thread_priority(buffer_size: BufferSize, sample_rate: crate::Sa
         0
     };
 
-    if let Err(err) = promote_current_thread_to_real_time(buffer_size, sample_rate.0) {
-        eprintln!("Failed to promote audio thread to real-time priority: {err}");
+    match ThreadPriorityGuard::acquire(
+        || promote_current_thread_to_real_time(buffer_size, sample_rate.0),
+        release_thread_priority,
+    ) {
+        Ok(guard) => Some(guard),
+        Err(err) => {
+            eprintln!("Failed to promote audio thread to real-time priority: {err}");
+            None
+        }
     }
 }
 
