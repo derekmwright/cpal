@@ -2,6 +2,7 @@ pub use self::device::{
     default_input_device, default_output_device, Device, Devices, SupportedInputConfigs,
     SupportedOutputConfigs,
 };
+pub use self::priority_observation::{ThreadPriorityObservation, ThreadPriorityStatus};
 pub use self::stream::Stream;
 use crate::traits::HostTrait;
 use crate::BackendSpecificError;
@@ -13,6 +14,7 @@ mod com;
 mod device;
 #[cfg(any(feature = "audio_thread_priority", test))]
 mod priority;
+mod priority_observation;
 mod stream;
 
 /// The WASAPI host, the default windows host type.

@@ -1,4 +1,5 @@
 use super::windows_err_to_cpal_err;
+use super::ThreadPriorityObservation;
 use crate::traits::StreamTrait;
 use crate::{
     BackendSpecificError, BufferSize, Data, InputCallbackInfo, OutputCallbackInfo,
@@ -17,9 +18,8 @@ use windows::Win32::System::Threading;
 pub struct Stream {
     /// The high-priority audio processing thread calling callbacks.
     /// Option used for moving out in destructor.
-    ///
-    /// TODO: Actually set the thread priority.
     thread: Option<JoinHandle<()>>,
+    priority: ThreadPriorityObservation,
 
     // Commands processed by the `run()` method that is currently running.
     // `pending_scheduled_event` must be signalled whenever a command is added here, so that it
@@ -32,6 +32,7 @@ pub struct Stream {
 }
 
 struct RunContext {
+    priority: ThreadPriorityObservation,
     // Streams that have been created in this event loop.
     stream: StreamInner,
 
@@ -79,6 +80,12 @@ pub struct StreamInner {
 }
 
 impl Stream {
+    /// Observe the actual scheduling registration result for this worker generation.
+    /// Available even after close if the returned handle is retained by the caller.
+    pub fn thread_priority_observation(&self) -> ThreadPriorityObservation {
+        self.priority.clone()
+    }
+
     pub(crate) fn new_input<D, E>(
         stream_inner: StreamInner,
         mut data_callback: D,
@@ -93,8 +100,10 @@ impl Stream {
         }
         .expect("cpal: could not create input stream event");
         let (tx, rx) = channel();
+        let priority = ThreadPriorityObservation::new(cfg!(feature = "audio_thread_priority"));
 
         let run_context = RunContext {
+            priority: priority.clone(),
             handles: vec![pending_scheduled_event, stream_inner.event],
             stream: stream_inner,
             commands: rx,
@@ -107,6 +116,7 @@ impl Stream {
 
         Stream {
             thread: Some(thread),
+            priority,
             commands: tx,
             pending_scheduled_event,
         }
@@ -126,8 +136,10 @@ impl Stream {
         }
         .expect("cpal: could not create output stream event");
         let (tx, rx) = channel();
+        let priority = ThreadPriorityObservation::new(cfg!(feature = "audio_thread_priority"));
 
         let run_context = RunContext {
+            priority: priority.clone(),
             handles: vec![pending_scheduled_event, stream_inner.event],
             stream: stream_inner,
             commands: rx,
@@ -140,6 +152,7 @@ impl Stream {
 
         Stream {
             thread: Some(thread),
+            priority,
             commands: tx,
             pending_scheduled_event,
         }
@@ -271,6 +284,7 @@ fn run_input(
     let _priority = boost_current_thread_priority(
         run_ctxt.stream.config.buffer_size,
         run_ctxt.stream.config.sample_rate,
+        &run_ctxt.priority,
     );
 
     loop {
@@ -303,6 +317,7 @@ fn run_output(
     let _priority = boost_current_thread_priority(
         run_ctxt.stream.config.buffer_size,
         run_ctxt.stream.config.sample_rate,
+        &run_ctxt.priority,
     );
 
     loop {
@@ -331,13 +346,28 @@ fn run_output(
 // release must both run on the registered thread, outside data callbacks.
 #[cfg(feature = "audio_thread_priority")]
 type ThreadPriorityGuard = super::priority::Guard<
-    audio_thread_priority::RtPriorityHandle,
-    fn(audio_thread_priority::RtPriorityHandle),
+    (
+        audio_thread_priority::RtPriorityHandle,
+        ThreadPriorityObservation,
+    ),
+    fn(
+        (
+            audio_thread_priority::RtPriorityHandle,
+            ThreadPriorityObservation,
+        ),
+    ),
 >;
 
 #[cfg(feature = "audio_thread_priority")]
-fn release_thread_priority(handle: audio_thread_priority::RtPriorityHandle) {
-    if let Err(err) = audio_thread_priority::demote_current_thread_from_real_time(handle) {
+fn release_thread_priority(
+    (handle, observation): (
+        audio_thread_priority::RtPriorityHandle,
+        ThreadPriorityObservation,
+    ),
+) {
+    if let Err(err) =
+        observation.release(|| audio_thread_priority::demote_current_thread_from_real_time(handle))
+    {
         eprintln!("Failed to restore audio thread priority: {err}");
     }
 }
@@ -346,6 +376,7 @@ fn release_thread_priority(handle: audio_thread_priority::RtPriorityHandle) {
 fn boost_current_thread_priority(
     buffer_size: BufferSize,
     sample_rate: crate::SampleRate,
+    observation: &ThreadPriorityObservation,
 ) -> Option<ThreadPriorityGuard> {
     use audio_thread_priority::promote_current_thread_to_real_time;
 
@@ -357,7 +388,11 @@ fn boost_current_thread_priority(
     };
 
     match ThreadPriorityGuard::acquire(
-        || promote_current_thread_to_real_time(buffer_size, sample_rate.0),
+        || {
+            observation
+                .register(|| promote_current_thread_to_real_time(buffer_size, sample_rate.0))
+                .map(|handle| (handle, observation.clone()))
+        },
         release_thread_priority,
     ) {
         Ok(guard) => Some(guard),
@@ -369,7 +404,11 @@ fn boost_current_thread_priority(
 }
 
 #[cfg(not(feature = "audio_thread_priority"))]
-fn boost_current_thread_priority(_: BufferSize, _: crate::SampleRate) {
+fn boost_current_thread_priority(
+    _: BufferSize,
+    _: crate::SampleRate,
+    _: &ThreadPriorityObservation,
+) {
     use windows::Win32::Foundation::HANDLE;
 
     unsafe {

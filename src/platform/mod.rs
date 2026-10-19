@@ -685,6 +685,8 @@ mod platform_impl {
         Device as WasapiDevice, Devices as WasapiDevices, Host as WasapiHost,
         Stream as WasapiStream, SupportedInputConfigs as WasapiSupportedInputConfigs,
         SupportedOutputConfigs as WasapiSupportedOutputConfigs,
+        ThreadPriorityObservation as WasapiThreadPriorityObservation,
+        ThreadPriorityStatus as WasapiThreadPriorityStatus,
     };
 
     impl_platform_host!(#[cfg(feature = "asio")] Asio asio "ASIO", Wasapi wasapi "WASAPI");
