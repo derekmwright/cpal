@@ -441,9 +441,9 @@ impl StreamInstant {
 
     /// Returns the instant in time one `duration` ago.
     ///
-    /// Returns `None` if the resulting instant would underflow. As a result, it is important to
-    /// consider that on some platforms the [`StreamInstant`] may begin at `0` from the moment the
-    /// source stream is created.
+    /// Returns `None` if the resulting instant would underflow the signed representation.
+    /// Representable negative instants are permitted by this API. This arithmetic does not
+    /// establish whether a backend's estimated timestamp is valid before its clock origin.
     pub fn sub(&self, duration: Duration) -> Option<Self> {
         self.as_nanos()
             .checked_sub(duration.as_nanos() as i128)
@@ -456,19 +456,18 @@ impl StreamInstant {
 
     #[allow(dead_code)]
     fn from_nanos(nanos: i64) -> Self {
-        let secs = nanos / 1_000_000_000;
-        let subsec_nanos = nanos - secs * 1_000_000_000;
+        let secs = nanos.div_euclid(1_000_000_000);
+        let subsec_nanos = nanos.rem_euclid(1_000_000_000);
         Self::new(secs, subsec_nanos as u32)
     }
 
     #[allow(dead_code)]
     fn from_nanos_i128(nanos: i128) -> Option<Self> {
-        let secs = nanos / 1_000_000_000;
+        let secs = nanos.div_euclid(1_000_000_000);
         if secs > i64::MAX as i128 || secs < i64::MIN as i128 {
             None
         } else {
-            let subsec_nanos = nanos - secs * 1_000_000_000;
-            debug_assert!(subsec_nanos < u32::MAX as i128);
+            let subsec_nanos = nanos.rem_euclid(1_000_000_000);
             Some(Self::new(secs as i64, subsec_nanos as u32))
         }
     }
@@ -878,4 +877,92 @@ fn test_stream_instant() {
         Some(StreamInstant::new(1, 0))
     );
     assert_eq!(max.add(Duration::from_secs(1)), None);
+}
+
+#[cfg(test)]
+mod signed_stream_instant_tests {
+    use super::*;
+
+    #[test]
+    fn fractional_subtraction_before_zero_stays_before_zero() {
+        let zero = StreamInstant::new(0, 0);
+        let delay = Duration::from_secs_f64(128.0 / 48_000.0);
+        let capture = zero.sub(delay).unwrap();
+        assert!(
+            capture < zero,
+            "capture must precede its callback: {capture:?}"
+        );
+        assert_eq!(zero.duration_since(&capture), Some(delay));
+        assert_eq!(capture.add(delay), Some(zero));
+        assert!(capture.nanos < 1_000_000_000);
+    }
+
+    #[test]
+    fn signed_nanosecond_constructors_round_trip() {
+        for nanos in [
+            i64::MIN,
+            -2_000_000_001,
+            -1_000_000_001,
+            -999_999_999,
+            -1,
+            0,
+            1,
+            i64::MAX,
+        ] {
+            let from_i64 = StreamInstant::from_nanos(nanos);
+            let from_i128 = StreamInstant::from_nanos_i128(i128::from(nanos)).unwrap();
+            assert_eq!(from_i64, from_i128);
+            assert_eq!(from_i64.as_nanos(), i128::from(nanos));
+            assert!(from_i64.nanos < 1_000_000_000);
+        }
+        assert_eq!(
+            StreamInstant::from_nanos(-1),
+            StreamInstant::new(-1, 999_999_999)
+        );
+    }
+
+    #[test]
+    fn fractional_underflow_is_rejected_at_the_signed_lower_bound() {
+        let min = StreamInstant::new(i64::MIN, 0);
+        let max = StreamInstant::new(i64::MAX, 999_999_999);
+        assert_eq!(min.sub(Duration::from_nanos(1)), None);
+        assert_eq!(max.add(Duration::from_nanos(1)), None);
+        assert_eq!(StreamInstant::from_nanos_i128(min.as_nanos() - 1), None);
+        assert_eq!(StreamInstant::from_nanos_i128(max.as_nanos() + 1), None);
+        assert_eq!(StreamInstant::from_nanos_i128(min.as_nanos()), Some(min));
+        assert_eq!(StreamInstant::from_nanos_i128(max.as_nanos()), Some(max));
+    }
+
+    #[test]
+    fn signed_arithmetic_matches_integer_nanoseconds_across_carry_and_borrow() {
+        let min = i128::from(i64::MIN) * 1_000_000_000;
+        let max = i128::from(i64::MAX) * 1_000_000_000 + 999_999_999;
+        for secs in [i64::MIN, -2, -1, 0, 1, 2, i64::MAX] {
+            for nanos in [0, 1, 999_999_999] {
+                let instant = StreamInstant::new(secs, nanos);
+                for duration in [
+                    Duration::ZERO,
+                    Duration::from_nanos(1),
+                    Duration::from_nanos(999_999_999),
+                    Duration::new(1, 1),
+                    Duration::new(u64::MAX, 999_999_999),
+                ] {
+                    let delta = duration.as_nanos() as i128;
+                    for (result, expected) in [
+                        (instant.add(duration), instant.as_nanos() + delta),
+                        (instant.sub(duration), instant.as_nanos() - delta),
+                    ] {
+                        match result {
+                            Some(actual) => {
+                                assert!((min..=max).contains(&expected));
+                                assert_eq!(actual.as_nanos(), expected);
+                                assert!(actual.nanos < 1_000_000_000);
+                            }
+                            None => assert!(!(min..=max).contains(&expected)),
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
